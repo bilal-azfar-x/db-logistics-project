@@ -1,86 +1,101 @@
-# backend/app.py
 from fastapi import FastAPI, Request
-import time
 import psycopg2
 import os
-import json
+import time
+from psycopg2.extras import RealDictCursor
 
 app = FastAPI()
 DB_URL = os.getenv("DATABASE_URL")
 
-# --- PERFORMANCE LOGGER MIDDLEWARE ---
 @app.middleware("http")
-async def add_process_time_header(request: Request, call_next):
-    start_time = time.time()
+async def timing(request: Request, call_next):
+    start = time.time()
     response = await call_next(request)
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
+    response.headers["X-Process-Time"] = str(time.time() - start)
     return response
 
-def get_db_connection():
+def get_conn():
+    if not DB_URL:
+        raise RuntimeError("DATABASE_URL not set")
     return psycopg2.connect(DB_URL)
 
 @app.get("/")
-def read_root():
-    return {"message": "System Online. Performance: CRITICAL."}
+def root():
+    return {"status": "ok"}
 
-# --- WEEK 1-2: Indexing Targets ---
 @app.get("/shipments/by-date")
-def get_by_date(date: str):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # BAD: LIKE query on text date
-    cur.execute(f"SELECT * FROM shipments WHERE created_at LIKE '{date}%'")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+def by_date(date: str):
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            start = f"{date}-01 00:00:00"
+            cur.execute("""
+                SELECT *
+                FROM shipments
+                WHERE created_at >= %s::timestamp
+                  AND created_at < (%s::timestamp + INTERVAL '1 month')
+                LIMIT 100
+            """, (start, start))
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-# --- WEEK 3: Normalization Target ---
 @app.get("/shipments/driver/{name}")
-def get_by_driver(name: str):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # BAD: Partial string match on un-normalized column
-    cur.execute("SELECT * FROM shipments WHERE driver_details LIKE %s", (f"%{name}%",))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+def by_driver(name: str):
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT s.*
+                FROM shipments s
+                JOIN drivers d ON s.driver_id = d.id
+                WHERE d.name ILIKE %s
+                LIMIT 50
+            """, (f"{name}%",))
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-# --- WEEK 4: JSON Target ---
 @app.get("/finance/high-value-invoices")
-def get_high_value():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # BAD: Parsing JSON text at runtime
-    cur.execute("SELECT * FROM finance_invoices WHERE CAST(raw_invoice_data::json->>'amount_cents' AS INT) > 50000")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+def finance():
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT *
+                FROM finance_invoices
+                WHERE (raw_invoice_data->>'amount_cents')::int > 50000
+                LIMIT 100
+            """)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-# --- WEEK 5: Partitioning Target ---
 @app.get("/telemetry/truck/{plate}")
-def get_truck_history(plate: str):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # BAD: Scanning 1M rows
-    cur.execute("SELECT * FROM truck_telemetry WHERE truck_license_plate = %s ORDER BY timestamp DESC LIMIT 100", (plate,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+def telemetry(plate: str, limit: int = 100):
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT *
+                FROM truck_telemetry
+                WHERE truck_license_plate = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+            """, (plate, limit))
+            return cur.fetchall()
+    finally:
+        conn.close()
 
-# --- WEEK 7: Analytics Target ---
 @app.get("/analytics/daily-stats")
-def get_stats():
-    conn = get_db_connection()
-    cur = conn.cursor()
-    # BAD: Real-time aggregation
-    sql = """
-    SELECT 
-        (SELECT COUNT(*) FROM shipments WHERE status='DELIVERED') as delivered,
-        (SELECT AVG(speed) FROM truck_telemetry) as avg_speed,
-        (SELECT SUM(CAST(raw_invoice_data::json->>'amount_cents' AS INT)) FROM finance_invoices) as revenue
-    """
-    cur.execute(sql)
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+def analytics():
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT delivered, avg_speed, revenue
+                FROM analytics_cache
+            """)
+            return cur.fetchone()
+    finally:
+        conn.close()

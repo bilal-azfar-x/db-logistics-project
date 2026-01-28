@@ -1,4 +1,3 @@
-# backend/Dockerfile
 FROM python:3.9-slim
 
 WORKDIR /app
@@ -8,5 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# We run the seeder first, then start the server
-CMD ["sh", "-c", "python seed.py && uvicorn app:app --host 0.0.0.0 --port 8000"]
+# IMPORTANT:
+# Seeder is run manually ONCE.
+# API should NEVER reseed on restart.
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
